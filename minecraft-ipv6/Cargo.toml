@@ -1,0 +1,17 @@
+[package]
+name = "minecraft-ipv6"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+chrono = "0.4"
+colored = "2.0"
+crossterm = "0.23"
+font8x8 = "0.3"
+futures = "0.3"
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+rand = "0.8"
