@@ -32,8 +32,9 @@ impl NameChecker {
             .iter()
             .map(|addr| {
                 let client = Client::builder()
-                    .timeout(Duration::from_secs(5))
-                    .pool_idle_timeout(Duration::from_secs(30))
+                    .timeout(Duration::from_secs(10))
+                    .tcp_keepalive(Duration::from_secs(60))
+                    .pool_idle_timeout(Duration::from_secs(60))
                     .pool_max_idle_per_host(50)
                     .local_address(IpAddr::V6(*addr))
                     .build()
@@ -417,11 +418,11 @@ async fn main() -> Result<()> {
                 }
 
                 clear_screen()?;
-                // Generate a range of IPv6 addresses
+                // Generate a range of IPv6 addresses within the specified subnet
+                let subnet_prefix = "2a0e:97c0:3e:ada::";
                 let ip_addresses = (0..100).map(|i| {
-                    let mut addr = [0; 16];
-                    addr[15] = i;
-                    Ipv6Addr::from(addr)
+                    let addr_str = format!("{}{:x}", subnet_prefix, i);
+                    addr_str.parse::<Ipv6Addr>().expect("Invalid IPv6 address")
                 }).collect::<Vec<_>>();
                 let checker = NameChecker::new(auth_tokens.clone(), ip_addresses);
                 checker.monitor_uuids(uuid_map.clone()).await?;
