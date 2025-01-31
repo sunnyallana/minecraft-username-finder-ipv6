@@ -9,50 +9,55 @@ use crossterm::{
 };
 use font8x8::{UnicodeFonts, BASIC_FONTS};
 use futures::{stream::FuturesUnordered, StreamExt};
-use rand::seq::SliceRandom;
 use reqwest::{Client, StatusCode};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::stdout;
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::IpAddr;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::time::Duration;
 
 struct NameChecker {
-    clients: Vec<Arc<Client>>,
+    clients: Arc<Vec<Client>>,
     auth_tokens: Vec<String>,
-    ip_addresses: Vec<Ipv6Addr>,
+    current_client: Arc<Mutex<usize>>,
 }
 
 impl NameChecker {
-    fn new(auth_tokens: Vec<String>, ip_addresses: Vec<Ipv6Addr>) -> Self {
-        // Create HTTP clients for each IP address
-        let clients = ip_addresses
-            .iter()
-            .map(|addr| {
-                let client = Client::builder()
-                    .timeout(Duration::from_secs(10))
-                    .tcp_keepalive(Duration::from_secs(60))
-                    .pool_idle_timeout(Duration::from_secs(60))
+    fn new(auth_tokens: Vec<String>, ipv6_addresses: Vec<IpAddr>) -> Result<Self> {
+        let clients: Result<Vec<Client>> = ipv6_addresses
+            .into_iter()
+            .map(|ip| {
+                Client::builder()
+                    .local_address(ip)
+                    .timeout(Duration::from_secs(5))
+                    .pool_idle_timeout(Duration::from_secs(30))
                     .pool_max_idle_per_host(50)
-                    .local_address(IpAddr::V6(*addr))
                     .build()
-                    .expect("Failed to create HTTP client");
-                Arc::new(client)
+                    .map_err(Error::from)
             })
             .collect();
 
-        Self {
-            clients,
+        let clients = clients?;
+
+        Ok(Self {
+            clients: Arc::new(clients),
             auth_tokens,
-            ip_addresses,
-        }
+            current_client: Arc::new(Mutex::new(0)),
+        })
+    }
+
+    async fn get_client(&self) -> Client {
+        let mut current = self.current_client.lock().await;
+        let client = self.clients[*current].clone();
+        *current = (*current + 1) % self.clients.len();
+        client
     }
 
     async fn check_account_exists(&self, uuid: &str) -> Result<(bool, StatusCode)> {
-        // Choose a random client (and thus a random IP address) for the request
-        let client = self.clients.choose(&mut rand::thread_rng()).unwrap();
+        let client = self.get_client().await;
         let resp = client
             .get(&format!(
                 "https://sessionserver.mojang.com/session/minecraft/profile/{}",
@@ -66,9 +71,8 @@ impl NameChecker {
     }
 
     async fn attempt_claim(&self, name: &str) -> Result<(bool, StatusCode)> {
+        let client = self.get_client().await;
         if let Some(auth_token) = self.auth_tokens.get(0) {
-            // Choose a random client (and thus a random IP address) for the request
-            let client = self.clients.choose(&mut rand::thread_rng()).unwrap();
             let resp = client
                 .put(&format!(
                     "https://api.minecraftservices.com/minecraft/profile/name/{}",
@@ -155,9 +159,9 @@ impl NameChecker {
 impl Clone for NameChecker {
     fn clone(&self) -> Self {
         Self {
-            clients: self.clients.clone(),
+            clients: Arc::clone(&self.clients),
             auth_tokens: self.auth_tokens.clone(),
-            ip_addresses: self.ip_addresses.clone(),
+            current_client: Arc::clone(&self.current_client),
         }
     }
 }
@@ -417,14 +421,26 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                display_base_ui_with_prompt("Enter IPv6 addresses (comma-separated, e.g., fd00::1,fd00::2): ", Color::DarkGrey)?;
+                let addresses = get_input("")?;
+                let ipv6_addresses: Vec<IpAddr> = addresses
+                    .split(',')
+                    .map(|s| s.trim().parse().expect("Invalid IPv6 address"))
+                    .collect();
+
+                let checker = match NameChecker::new(auth_tokens.clone(), ipv6_addresses) {
+                    Ok(checker) => checker,
+                    Err(e) => {
+                        display_base_ui()?;
+                        println_colored(&format!("Failed to create NameChecker: {}", e), Color::Red)?;
+                        println!();
+                        print_colored("Enter your choice ", Color::DarkGrey)?;
+                        println_colored("(1-4):", Color::DarkGrey)?;
+                        continue;
+                    }
+                };
+
                 clear_screen()?;
-                // Generate a range of IPv6 addresses within the specified subnet
-                let subnet_prefix = "2a0e:97c0:3e:ada::";
-                let ip_addresses = (0..100).map(|i| {
-                    let addr_str = format!("{}{:x}", subnet_prefix, i);
-                    addr_str.parse::<Ipv6Addr>().expect("Invalid IPv6 address")
-                }).collect::<Vec<_>>();
-                let checker = NameChecker::new(auth_tokens.clone(), ip_addresses);
                 checker.monitor_uuids(uuid_map.clone()).await?;
             }
             Ok(4) => {
